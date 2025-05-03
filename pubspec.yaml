@@ -37,14 +37,11 @@ dependencies:
   cupertino_icons: ^1.0.8
     # Camera
   camera: ^0.10.5+5
-  
-  # Text recognition
-  google_mlkit_text_recognition: ^0.11.0
-  
-  # Image processing
+  tflite_flutter: ^0.10.3
   image: ^4.1.3
-  path: ^1.8.3
   path_provider: ^2.1.1
+  permission_handler: ^11.0.1
+  google_mlkit_text_recognition: ^0.11.0
 
 dev_dependencies:
   flutter_test:

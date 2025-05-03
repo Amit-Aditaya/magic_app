@@ -1,415 +1,256 @@
-
+import 'dart:async';
+import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // Request camera permission
+  await Permission.camera.request();
+  
+  // Get available cameras
   final cameras = await availableCameras();
-
-  // Specifically select the back camera
-  final backCamera = cameras.firstWhere(
-    (camera) => camera.lensDirection == CameraLensDirection.back,
-    orElse: () => cameras.first,
-  );
-
-  runApp(MyApp(camera: backCamera));
-}
-
-class MyApp extends StatelessWidget {
-  final CameraDescription camera;
-
-  const MyApp({Key? key, required this.camera}) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      home: TextRecognitionScreen(camera: camera),
-      debugShowCheckedModeBanner: false,
-    );
+  if (cameras.isEmpty) {
+    print('No cameras available');
+    return;
   }
+  
+  // Use the first available camera
+  final firstCamera = cameras.first;
+  
+  runApp(
+    MaterialApp(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        useMaterial3: true,
+      ),
+      home: TextRecognitionScreen(camera: firstCamera),
+    ),
+  );
 }
 
 class TextRecognitionScreen extends StatefulWidget {
   final CameraDescription camera;
-
-  const TextRecognitionScreen({Key? key, required this.camera})
-      : super(key: key);
+  
+  const TextRecognitionScreen({Key? key, required this.camera}) : super(key: key);
 
   @override
   _TextRecognitionScreenState createState() => _TextRecognitionScreenState();
 }
 
-class _TextRecognitionScreenState extends State<TextRecognitionScreen>
-    with WidgetsBindingObserver {
-  late CameraController _controller;
-  late Future<void> _initializeControllerFuture;
-  bool _isDetecting = false;
-  List<String> _detectedTexts = [];
+class _TextRecognitionScreenState extends State<TextRecognitionScreen> {
+  late CameraController _cameraController;
   final TextRecognizer _textRecognizer = TextRecognizer();
   bool _isProcessing = false;
-  String _debugInfo = "";
+  bool _isRecognizing = false;
+  List<String> _recognizedTextList = [];
+  Timer? _timer;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _initializeCamera();
   }
 
-  void _initializeCamera() {
-    _controller = CameraController(
+  Future<void> _initializeCamera() async {
+    _cameraController = CameraController(
       widget.camera,
-      ResolutionPreset
-          .high, // Changed from medium to high for better recognition
+      ResolutionPreset.medium,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup
-          .yuv420, // Explicitly set format for better compatibility
     );
-    _initializeControllerFuture = _controller.initialize().then((_) {
-      if (mounted) {
-        setState(() {});
-        // Set focus and exposure after initialization
-        _controller.setFocusMode(FocusMode.auto);
-        _controller.setExposureMode(ExposureMode.auto);
+
+    try {
+      await _cameraController.initialize();
+      setState(() {});
+    } catch (e) {
+      print('Error initializing camera: $e');
+    }
+  }
+
+  void _toggleTextRecognition() {
+    setState(() {
+      _isRecognizing = !_isRecognizing;
+      
+      if (_isRecognizing) {
+        // Start recognition at regular intervals
+        _timer = Timer.periodic(const Duration(seconds: 2), (_) {
+          if (!_isProcessing) {
+            _processImage();
+          }
+        });
+      } else {
+        // Stop recognition
+        _timer?.cancel();
+        _timer = null;
       }
-    }).catchError((error) {
-      setState(() {
-        _debugInfo = 'Error initializing camera: $error';
-      });
-      print('Error initializing camera: $error');
     });
+  }
+
+  void _clearRecognizedText() {
+    setState(() {
+      _recognizedTextList.clear();
+    });
+  }
+
+  Future<void> _processImage() async {
+    if (!_cameraController.value.isInitialized || _isProcessing) return;
+
+    setState(() {
+      _isProcessing = true;
+    });
+
+    try {
+      // Capture image
+      final XFile file = await _cameraController.takePicture();
+      
+      // Create input image from file
+      final InputImage inputImage = InputImage.fromFilePath(file.path);
+      
+      // Process the image
+      final RecognizedText recognizedText = await _textRecognizer.processImage(inputImage);
+      
+      // Extract and add text to list
+      if (recognizedText.text.isNotEmpty) {
+        setState(() {
+          // Add each line as a separate item
+          for (TextBlock block in recognizedText.blocks) {
+            for (TextLine line in block.lines) {
+              if (line.text.trim().isNotEmpty && 
+                  !_recognizedTextList.contains(line.text.trim())) {
+                _recognizedTextList.add(line.text.trim());
+              }
+            }
+          }
+        });
+      }
+      
+      // Delete the temporary image file
+      await File(file.path).delete();
+    } catch (e) {
+      print('Error recognizing text: $e');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
+    }
   }
 
   @override
   void dispose() {
-    stopDetection();
-    _controller.dispose();
+    _timer?.cancel();
+    _cameraController.dispose();
     _textRecognizer.close();
-    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Handle app lifecycle changes
-    if (!_controller.value.isInitialized) return;
-
-    if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.paused) {
-      stopDetection();
-    } else if (state == AppLifecycleState.resumed) {
-      if (_isDetecting) {
-        startDetection();
-      }
-    }
-  }
-
-  List<String> _textWindow = [];
-  final int _windowSize = 10;
-  String _lastStableText = "";
-
-  void startDetection() async {
-    try {
-      await _initializeControllerFuture;
-
-      if (_controller.value.isStreamingImages) return;
-
-      setState(() {
-        _debugInfo = "Starting image stream...";
-      });
-
-      await _controller.startImageStream((CameraImage image) async {
-        if (_isProcessing) return;
-
-        _isProcessing = true;
-        _isDetecting = true;
-
-        try {
-          final WriteBuffer allBytes = WriteBuffer();
-          for (final Plane plane in image.planes) {
-            allBytes.putUint8List(plane.bytes);
-          }
-          final bytes = allBytes.done().buffer.asUint8List();
-
-          final Size imageSize =
-              Size(image.width.toDouble(), image.height.toDouble());
-
-          final camera = widget.camera;
-          final imageRotation = _getRotationValue(camera.sensorOrientation);
-
-          final inputImageFormat =
-              InputImageFormatValue.fromRawValue(image.format.raw) ??
-                  InputImageFormat.yuv420;
-
-          final inputImage = InputImage.fromBytes(
-            bytes: bytes,
-            metadata: InputImageMetadata(
-              size: imageSize,
-              rotation: imageRotation,
-              format: inputImageFormat,
-              bytesPerRow: image.planes[0].bytesPerRow,
-            ),
-          );
-
-          final RecognizedText recognizedText =
-              await _textRecognizer.processImage(inputImage);
-          final String cleanedText =
-              recognizedText.text.trim().replaceAll('\n', ' ');
-
-          if (cleanedText.isNotEmpty) {
-            _textWindow.insert(0, cleanedText);
-            if (_textWindow.length > _windowSize) {
-              _textWindow.removeLast();
-            }
-
-            final mostCommonText = _getMostFrequentText(_textWindow);
-            if (mostCommonText != _lastStableText) {
-              setState(() {
-                _detectedTexts.insert(0, mostCommonText);
-                if (_detectedTexts.length > 20) {
-                  _detectedTexts = _detectedTexts.sublist(0, 20);
-                }
-                _lastStableText = mostCommonText;
-                _debugInfo = "Stable output: $mostCommonText";
-              });
-            }
-          }
-        } catch (e) {
-          setState(() {
-            _debugInfo = "Error detecting text: $e";
-          });
-          print('Error detecting text: $e');
-        } finally {
-          await Future.delayed(
-              Duration(milliseconds: 500)); // slower but more stable
-          _isProcessing = false;
-        }
-      });
-    } catch (e) {
-      setState(() {
-        _debugInfo = "Error starting image stream: $e";
-      });
-      print('Error starting image stream: $e');
-      _isDetecting = false;
-    }
-  }
-
-  String _getMostFrequentText(List<String> texts) {
-    final Map<String, int> frequency = {};
-    for (var text in texts) {
-      frequency[text] = (frequency[text] ?? 0) + 1;
-    }
-    final sorted = frequency.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    return sorted.isNotEmpty ? sorted.first.key : "";
-  }
-
-  InputImageRotation _getRotationValue(int sensorOrientation) {
-    // Get the device orientation
-    final deviceOrientation = MediaQuery.of(context).orientation;
-
-    // Calculate rotation compensation based on device and sensor orientation
-    int rotationCompensation = 0;
-
-    if (deviceOrientation == Orientation.portrait) {
-      rotationCompensation = sensorOrientation;
-    } else if (deviceOrientation == Orientation.landscape) {
-      if (sensorOrientation == 90) {
-        rotationCompensation = 0;
-      } else if (sensorOrientation == 270) {
-        rotationCompensation = 180;
-      }
-    }
-
-    // Map rotation to InputImageRotation value
-    switch (rotationCompensation) {
-      case 0:
-        return InputImageRotation.rotation0deg;
-      case 90:
-        return InputImageRotation.rotation90deg;
-      case 180:
-        return InputImageRotation.rotation180deg;
-      case 270:
-        return InputImageRotation.rotation270deg;
-      default:
-        return InputImageRotation.rotation0deg;
-    }
-  }
-
-  void stopDetection() {
-    _isDetecting = false;
-
-    // Check if controller is initialized and streaming before stopping
-    if (_controller.value.isInitialized &&
-        _controller.value.isStreamingImages) {
-      try {
-        _controller.stopImageStream();
-      } catch (e) {
-        print('Error stopping image stream: $e');
-      }
-    }
-  }
-
-  void clearDetectedText() {
-    setState(() {
-      _detectedTexts.clear();
-    });
-  }
-
-  // New function to take a single photo and process it
-  void captureAndProcessSingle() async {
-    try {
-      await _initializeControllerFuture;
-
-      setState(() {
-        _debugInfo = "Capturing single image...";
-      });
-
-      final XFile image = await _controller.takePicture();
-
-      setState(() {
-        _debugInfo = "Processing captured image...";
-      });
-
-      final InputImage inputImage = InputImage.fromFilePath(image.path);
-      final RecognizedText recognizedText =
-          await _textRecognizer.processImage(inputImage);
-
-      String debugText =
-          "Recognition result: ${recognizedText.text.isEmpty ? 'No text found' : 'Text detected'}";
-      if (recognizedText.blocks.isNotEmpty) {
-        for (final block in recognizedText.blocks) {
-          debugText += "\nBlock text: ${block.text}";
-        }
-      }
-
-      setState(() {
-        _debugInfo = debugText;
-        if (recognizedText.text.isNotEmpty) {
-          _detectedTexts.insert(0, recognizedText.text);
-          if (_detectedTexts.length > 20) {
-            _detectedTexts = _detectedTexts.sublist(0, 20);
-          }
-        }
-      });
-    } catch (e) {
-      setState(() {
-        _debugInfo = "Error capturing/processing image: $e";
-      });
-      print('Error capturing/processing image: $e');
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
+    if (!_cameraController.value.isInitialized) {
+      return const Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
     return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: Text('Live Text Recognition'),
-        backgroundColor: Colors.black,
-        actions: [
-          IconButton(
-            icon: Icon(Icons.delete),
-            onPressed: clearDetectedText,
-            tooltip: 'Clear detected text',
-          ),
-        ],
-      ),
-      body: FutureBuilder<void>(
-        future: _initializeControllerFuture,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.done) {
-            return Column(
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    ElevatedButton(
-                      onPressed: _isDetecting ? null : startDetection,
-                      child: Text('Start Stream'),
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Control buttons at the top
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isRecognizing ? Colors.red : Colors.green,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                     ),
-                    ElevatedButton(
-                      onPressed: _isDetecting ? stopDetection : null,
-                      child: Text('Stop Stream'),
-                    ),
-                    ElevatedButton(
-                      onPressed: captureAndProcessSingle,
-                      child: Text('Capture Single'),
-                    ),
-                  ],
-                ),
-                SizedBox(height: 10),
-                // Debug info display
-                Container(
-                  padding: EdgeInsets.all(8),
-                  color: Colors.grey[800],
-                  width: double.infinity,
-                  child: Text(
-                    'Debug: $_debugInfo',
-                    style: TextStyle(color: Colors.white, fontSize: 12),
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
+                    onPressed: _toggleTextRecognition,
+                    child: Text(_isRecognizing ? 'Stop' : 'Start'),
                   ),
-                ),
-                SizedBox(height: 10),
-                Expanded(
-                  flex: 2,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: CameraPreview(_controller),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline, size: 28),
+                    onPressed: _clearRecognizedText,
+                    tooltip: 'Clear recognized text',
                   ),
+                ],
+              ),
+            ),
+            
+            // Camera preview - approximately half of the screen
+            Expanded(
+              flex: 5,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: CameraPreview(_cameraController),
                 ),
-                SizedBox(height: 10),
-                Expanded(
-                  flex: 1,
-                  child: Container(
-                    padding: EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[900],
-                      borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            
+            // Recognized text list - remaining half
+            Expanded(
+              flex: 5,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.text_fields),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Recognized Text',
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                      ],
                     ),
-                    child: _detectedTexts.isEmpty
-                        ? Center(
+                  ),
+                  
+                  // List of recognized text
+                  Expanded(
+                    child: _recognizedTextList.isEmpty
+                        ? const Center(
                             child: Text(
-                              'No text detected yet',
-                              style: TextStyle(color: Colors.white70),
+                              'No text recognized yet',
+                              style: TextStyle(color: Colors.grey),
                             ),
                           )
                         : ListView.builder(
-                            itemCount: _detectedTexts.length,
+                            padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                            itemCount: _recognizedTextList.length,
                             itemBuilder: (context, index) {
                               return Card(
-                                color: Colors.grey[800],
-                                margin: EdgeInsets.symmetric(vertical: 4),
+                                margin: const EdgeInsets.only(bottom: 8.0),
                                 child: Padding(
-                                  padding: EdgeInsets.all(8),
+                                  padding: const EdgeInsets.all(12.0),
                                   child: Text(
-                                    _detectedTexts[index],
-                                    style: TextStyle(
-                                        color: Colors.white, fontSize: 16),
+                                    _recognizedTextList[index],
+                                    style: const TextStyle(fontSize: 16),
                                   ),
                                 ),
                               );
                             },
                           ),
                   ),
-                ),
-              ],
-            );
-          } else if (snapshot.hasError) {
-            return Center(
-              child: Text(
-                'Error initializing camera: ${snapshot.error}',
-                style: TextStyle(color: Colors.white),
+                ],
               ),
-            );
-          } else {
-            return Center(child: CircularProgressIndicator());
-          }
-        },
+            ),
+          ],
+        ),
       ),
     );
   }
