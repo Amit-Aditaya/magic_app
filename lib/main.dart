@@ -19,7 +19,7 @@ void main() async {
 class MyApp extends StatelessWidget {
   final CameraDescription camera;
 
-  const MyApp({Key? key, required this.camera}) : super(key: key);
+  const MyApp({super.key, required this.camera});
 
   @override
   Widget build(BuildContext context) {
@@ -33,8 +33,7 @@ class MyApp extends StatelessWidget {
 class TextRecognitionScreen extends StatefulWidget {
   final CameraDescription camera;
 
-  const TextRecognitionScreen({Key? key, required this.camera})
-      : super(key: key);
+  const TextRecognitionScreen({super.key, required this.camera});
 
   @override
   _TextRecognitionScreenState createState() => _TextRecognitionScreenState();
@@ -46,7 +45,8 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   late Future<void> _initializeControllerFuture;
   bool _isDetecting = false;
   List<String> _detectedTexts = [];
-  final TextRecognizer _textRecognizer = TextRecognizer();
+  final TextRecognizer _textRecognizer =
+      TextRecognizer(script: TextRecognitionScript.latin);
   bool _isProcessing = false;
   String _debugInfo = "";
 
@@ -187,7 +187,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
           print('Error detecting text: $e');
         } finally {
           // Reduced delay to process more frames
-          await Future.delayed(Duration(milliseconds: 200));
+          await Future.delayed(const Duration(milliseconds: 200));
           _isProcessing = false;
         }
       });
@@ -301,11 +301,11 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: Text('Live Text Recognition'),
+        title: const Text('Live Text Recognition'),
         backgroundColor: Colors.black,
         actions: [
           IconButton(
-            icon: Icon(Icons.delete),
+            icon: const Icon(Icons.delete),
             onPressed: clearDetectedText,
             tooltip: 'Clear detected text',
           ),
@@ -322,32 +322,32 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
                   children: [
                     ElevatedButton(
                       onPressed: _isDetecting ? null : startDetection,
-                      child: Text('Start Stream'),
+                      child: const Text('Start Stream'),
                     ),
                     ElevatedButton(
                       onPressed: _isDetecting ? stopDetection : null,
-                      child: Text('Stop Stream'),
+                      child: const Text('Stop Stream'),
                     ),
                     ElevatedButton(
                       onPressed: captureAndProcessSingle,
-                      child: Text('Capture Single'),
+                      child: const Text('Capture Single'),
                     ),
                   ],
                 ),
-                SizedBox(height: 10),
+                const SizedBox(height: 10),
                 // Debug info display
                 Container(
-                  padding: EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(8),
                   color: Colors.grey[800],
                   width: double.infinity,
                   child: Text(
                     'Debug: $_debugInfo',
-                    style: TextStyle(color: Colors.white, fontSize: 12),
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
                     maxLines: 3,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                SizedBox(height: 10),
+                const SizedBox(height: 10),
                 Expanded(
                   flex: 2,
                   child: ClipRRect(
@@ -355,17 +355,17 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
                     child: CameraPreview(_controller),
                   ),
                 ),
-                SizedBox(height: 10),
+                const SizedBox(height: 10),
                 Expanded(
                   flex: 1,
                   child: Container(
-                    padding: EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
                       color: Colors.grey[900],
                       borderRadius: BorderRadius.circular(10),
                     ),
                     child: _detectedTexts.isEmpty
-                        ? Center(
+                        ? const Center(
                             child: Text(
                               'No text detected yet',
                               style: TextStyle(color: Colors.white70),
@@ -376,12 +376,12 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
                             itemBuilder: (context, index) {
                               return Card(
                                 color: Colors.grey[800],
-                                margin: EdgeInsets.symmetric(vertical: 4),
+                                margin: const EdgeInsets.symmetric(vertical: 4),
                                 child: Padding(
-                                  padding: EdgeInsets.all(8),
+                                  padding: const EdgeInsets.all(8),
                                   child: Text(
                                     _detectedTexts[index],
-                                    style: TextStyle(
+                                    style: const TextStyle(
                                         color: Colors.white, fontSize: 16),
                                   ),
                                 ),
@@ -396,11 +396,11 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
             return Center(
               child: Text(
                 'Error initializing camera: ${snapshot.error}',
-                style: TextStyle(color: Colors.white),
+                style: const TextStyle(color: Colors.white),
               ),
             );
           } else {
-            return Center(child: CircularProgressIndicator());
+            return const Center(child: CircularProgressIndicator());
           }
         },
       ),
