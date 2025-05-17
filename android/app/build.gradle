@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.magic_app"
+    namespace = "com.magic.magic_app"
     compileSdk = 35
     ndkVersion = flutter.ndkVersion
 
