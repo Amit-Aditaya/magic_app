@@ -500,6 +500,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
         print('Error stopping image stream: $e');
       }
     }
+    setState(() {});
   }
 
   void clearDetectedText() {
