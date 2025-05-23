@@ -32,16 +32,25 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class DetectedText {
-  final String text;
-  final double confidence;
-  final DateTime timestamp;
+class DetectionStats {
+  final Map<String, List<double>> confidenceHistory = {};
+  final Map<String, int> occurrenceCount = {};
+  final DateTime startTime = DateTime.now();
 
-  DetectedText({
-    required this.text,
-    required this.confidence,
-    required this.timestamp,
-  });
+  void addDetection(String text, double confidence) {
+    confidenceHistory.putIfAbsent(text, () => []).add(confidence);
+    occurrenceCount[text] = (occurrenceCount[text] ?? 0) + 1;
+  }
+
+  double getAverageConfidence(String text) {
+    final confidences = confidenceHistory[text] ?? [];
+    if (confidences.isEmpty) return 0.0;
+    return confidences.reduce((a, b) => a + b) / confidences.length;
+  }
+
+  int getElapsedMs() {
+    return DateTime.now().difference(startTime).inMilliseconds;
+  }
 }
 
 class TextRecognitionScreen extends StatefulWidget {
@@ -64,17 +73,24 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   bool _isProcessing = false;
   String _debugInfo = "";
   Timer? _detectionTimer;
+  Timer? _emergencyTimer;
 
-  // Text stabilization properties
-  final Map<String, int> _textCandidates = {};
-  final Map<String, double> _textConfidences = {};
-  static const int _minimumOccurrences = 3; // Text must appear at least 3 times
-  static const double _minimumConfidence = 0.7; // Minimum confidence threshold
-  static const int _stabilizationWindowMs = 2000; // 2 second window
+  // Adaptive detection system
+  DetectionStats _stats = DetectionStats();
+  bool _hasTriggeredFlash = false;
+  bool _hasIncreasedSensitivity = false;
 
-  // Focus assistance
-  bool _isFocusing = false;
-  DateTime? _lastFocusTime;
+  // Adaptive thresholds
+  double _currentConfidenceThreshold = 0.75; // Start high
+  int _currentOccurrenceThreshold = 3; // Start high
+
+  // Emergency fallback
+  String? _bestCandidateText;
+  double _bestCandidateScore = 0.0;
+
+  // Auto-enhancement flags
+  bool _autoFlashEnabled = false;
+  double _currentZoomLevel = 1.0;
 
   @override
   void initState() {
@@ -86,7 +102,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   void _initializeCamera() {
     _controller = CameraController(
       widget.camera,
-      ResolutionPreset.veryHigh, // Highest resolution for best text clarity
+      ResolutionPreset.veryHigh,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.yuv420,
     );
@@ -94,8 +110,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     _initializeControllerFuture = _controller.initialize().then((_) {
       if (mounted) {
         setState(() {});
-        // Optimize camera settings for document reading
-        _optimizeCameraForDocuments();
+        _optimizeCameraSettings();
       }
     }).catchError((error) {
       setState(() {
@@ -105,24 +120,21 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     });
   }
 
-  void _optimizeCameraForDocuments() async {
+  Future<void> _optimizeCameraSettings() async {
     try {
-      // Set focus mode to auto with macro capability if available
       await _controller.setFocusMode(FocusMode.auto);
       await _controller.setExposureMode(ExposureMode.auto);
-
-      // Enable flash for better illumination if needed
       await _controller.setFlashMode(FlashMode.off);
 
-      // Set zoom slightly for better text recognition (if supported)
+      // Start with slight zoom for better text clarity
       final double maxZoom = await _controller.getMaxZoomLevel();
-      if (maxZoom > 1.0) {
-        await _controller
-            .setZoomLevel(1.2); // Slight zoom for better text clarity
+      if (maxZoom > 1.2) {
+        _currentZoomLevel = 1.2;
+        await _controller.setZoomLevel(_currentZoomLevel);
       }
 
       setState(() {
-        _debugInfo = "Camera optimized for document reading";
+        _debugInfo = "Camera optimized - ready for magic! 🎩";
       });
     } catch (e) {
       print('Error optimizing camera: $e');
@@ -133,6 +145,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   void dispose() {
     stopDetection();
     _detectionTimer?.cancel();
+    _emergencyTimer?.cancel();
     _controller.dispose();
     _textRecognizer.close();
     WidgetsBinding.instance.removeObserver(this);
@@ -156,19 +169,17 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   void startDetection() async {
     try {
       await _initializeControllerFuture;
-
       if (_controller.value.isStreamingImages) return;
 
-      // Clear previous results
-      _textCandidates.clear();
-      _textConfidences.clear();
-      setState(() {
-        _finalDetectedText = null;
-        _debugInfo = "Starting enhanced text detection...";
-      });
+      // Reset all state
+      _resetDetectionState();
 
-      // Start stabilization timer
-      _startStabilizationTimer();
+      // Set up timers for adaptive behavior
+      _setupAdaptiveTimers();
+
+      setState(() {
+        _debugInfo = "🔍 Scanning for text... (Hold steady for 2-3 seconds)";
+      });
 
       await _controller.startImageStream((CameraImage image) async {
         if (_isProcessing) return;
@@ -177,24 +188,19 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
         _isDetecting = true;
 
         try {
-          // Auto-focus periodically for better text clarity
-          _autoFocusIfNeeded();
+          // Enhanced auto-focus for clarity
+          await _smartAutoFocus();
 
-          // Convert and process image with enhanced settings
           final inputImage = await _convertCameraImage(image);
           final RecognizedText recognizedText =
               await _textRecognizer.processImage(inputImage);
 
-          // Process results with confidence filtering
           _processRecognitionResults(recognizedText);
         } catch (e) {
-          setState(() {
-            _debugInfo = "Error during detection: $e";
-          });
-          print('Error detecting text: $e');
+          print('Detection error: $e');
         } finally {
-          // Reduced processing interval for more samples
-          await Future.delayed(const Duration(milliseconds: 300));
+          // Faster processing for quicker detection
+          await Future.delayed(const Duration(milliseconds: 150));
           _isProcessing = false;
         }
       });
@@ -202,47 +208,106 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       setState(() {
         _debugInfo = "Error starting detection: $e";
       });
-      print('Error starting image stream: $e');
       _isDetecting = false;
     }
   }
 
-  void _autoFocusIfNeeded() async {
-    final now = DateTime.now();
-    if (_lastFocusTime == null ||
-        now.difference(_lastFocusTime!).inMilliseconds > 1500) {
-      try {
+  void _resetDetectionState() {
+    _stats = DetectionStats();
+    _hasTriggeredFlash = false;
+    _hasIncreasedSensitivity = false;
+    _currentConfidenceThreshold = 0.75;
+    _currentOccurrenceThreshold = 3;
+    _bestCandidateText = null;
+    _bestCandidateScore = 0.0;
+    _finalDetectedText = null;
+  }
+
+  void _setupAdaptiveTimers() {
+    // Main evaluation timer (faster)
+    _detectionTimer?.cancel();
+    _detectionTimer = Timer.periodic(
+      const Duration(milliseconds: 300),
+      (timer) => _evaluateAdaptiveDetection(),
+    );
+
+    // Step 1: Lower thresholds after 1.5 seconds
+    Timer(const Duration(milliseconds: 1500), () {
+      if (_isDetecting && _finalDetectedText == null) {
+        _currentConfidenceThreshold = 0.65;
+        _currentOccurrenceThreshold = 2;
         setState(() {
-          _isFocusing = true;
+          _debugInfo = "📸 Enhancing sensitivity...";
         });
-
-        // Trigger auto-focus
-        await _controller.setFocusPoint(const Offset(0.5, 0.5));
-        await _controller.setFocusMode(FocusMode.auto);
-
-        _lastFocusTime = now;
-
-        // Brief delay to let focus complete
-        await Future.delayed(const Duration(milliseconds: 200));
-
-        setState(() {
-          _isFocusing = false;
-        });
-      } catch (e) {
-        setState(() {
-          _isFocusing = false;
-        });
-        print('Auto-focus error: $e');
+        _hasIncreasedSensitivity = true;
       }
+    });
+
+    // Step 2: Enable auto-flash after 2.5 seconds
+    Timer(const Duration(milliseconds: 2500), () {
+      if (_isDetecting && _finalDetectedText == null) {
+        // _enableAutoFlash();
+      }
+    });
+
+    // Step 3: Emergency fallback after 4 seconds
+    _emergencyTimer = Timer(const Duration(milliseconds: 4000), () {
+      if (_isDetecting && _finalDetectedText == null) {
+        _triggerEmergencyFallback();
+      }
+    });
+  }
+
+  Future<void> _smartAutoFocus() async {
+    // More aggressive focus for text
+    try {
+      await _controller.setFocusPoint(const Offset(0.5, 0.5));
+      await _controller.setExposurePoint(const Offset(0.5, 0.5));
+    } catch (e) {
+      // Ignore focus errors
     }
   }
 
-  void _startStabilizationTimer() {
-    _detectionTimer?.cancel();
-    _detectionTimer = Timer.periodic(
-      const Duration(milliseconds: 500),
-      (timer) => _evaluateStabilizedText(),
-    );
+  Future<void> _enableAutoFlash() async {
+    if (_hasTriggeredFlash) return;
+
+    try {
+      setState(() {
+        _debugInfo = "💡 Auto-flash enabled for better detection";
+      });
+
+      await _controller.setFlashMode(FlashMode.torch);
+      _hasTriggeredFlash = true;
+      _autoFlashEnabled = true;
+
+      // Flash for 1 second then turn off
+      Timer(const Duration(milliseconds: 1000), () async {
+        try {
+          await _controller.setFlashMode(FlashMode.off);
+          _autoFlashEnabled = false;
+        } catch (e) {
+          print('Error turning off flash: $e');
+        }
+      });
+    } catch (e) {
+      print('Error enabling flash: $e');
+    }
+  }
+
+  void _triggerEmergencyFallback() {
+    if (_bestCandidateText != null && _bestCandidateScore > 0.3) {
+      setState(() {
+        _finalDetectedText = _bestCandidateText;
+        _debugInfo = "✅ DETECTED (Emergency): '$_bestCandidateText'";
+      });
+
+      HapticFeedback.heavyImpact();
+      stopDetection();
+    } else {
+      setState(() {
+        _debugInfo = "⚠️ Move paper closer or improve lighting";
+      });
+    }
   }
 
   Future<InputImage> _convertCameraImage(CameraImage image) async {
@@ -272,28 +337,23 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
   void _processRecognitionResults(RecognizedText recognizedText) {
     for (final block in recognizedText.blocks) {
-      // Calculate confidence based on block confidence and other factors
-      double blockConfidence = _calculateBlockConfidence(block);
+      double blockConfidence = _calculateEnhancedConfidence(block);
+      String cleanText = _cleanText(block.text);
 
-      if (blockConfidence >= _minimumConfidence) {
-        String cleanText = _cleanText(block.text);
+      if (cleanText.isNotEmpty && cleanText.length >= 2) {
+        _stats.addDetection(cleanText, blockConfidence);
 
-        if (cleanText.isNotEmpty && cleanText.length >= 2) {
-          // Add to candidates
-          _textCandidates[cleanText] = (_textCandidates[cleanText] ?? 0) + 1;
-          _textConfidences[cleanText] =
-              (_textConfidences[cleanText] ?? 0.0) + blockConfidence;
-
-          setState(() {
-            _debugInfo =
-                "Analyzing: '$cleanText' (${_textCandidates[cleanText]} times, avg conf: ${(_textConfidences[cleanText]! / _textCandidates[cleanText]!).toStringAsFixed(2)})";
-          });
+        // Always track the best candidate for emergency fallback
+        double candidateScore = blockConfidence * (cleanText.length / 10.0);
+        if (candidateScore > _bestCandidateScore) {
+          _bestCandidateScore = candidateScore;
+          _bestCandidateText = cleanText;
         }
       }
     }
   }
 
-  double _calculateBlockConfidence(TextBlock block) {
+  double _calculateEnhancedConfidence(TextBlock block) {
     double confidence = 0.0;
     int elementCount = 0;
 
@@ -308,63 +368,82 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
     double avgConfidence = confidence / elementCount;
 
-    // Boost confidence for longer texts (more likely to be intentional)
-    if (block.text.length > 5) {
-      avgConfidence *= 1.1;
-    }
+    // Enhanced scoring with adaptive boosts
+    if (block.text.length > 3) avgConfidence *= 1.15;
+    if (block.text.length > 6) avgConfidence *= 1.1;
 
-    // Reduce confidence for very short texts (likely noise)
-    if (block.text.length < 3) {
-      avgConfidence *= 0.8;
-    }
+    // Boost confidence if we've lowered thresholds (harder conditions)
+    if (_hasIncreasedSensitivity) avgConfidence *= 1.1;
+    if (_hasTriggeredFlash) avgConfidence *= 1.05;
 
     return avgConfidence.clamp(0.0, 1.0);
   }
 
   String _cleanText(String text) {
-    // Remove extra whitespace and special characters
     return text
-        .replaceAll(
-            RegExp(r'[^\w\s]'), '') // Remove non-alphanumeric except spaces
-        .replaceAll(RegExp(r'\s+'), ' ') // Normalize spaces
+        .replaceAll(RegExp(r'[^\w\s]'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
         .trim()
-        .toUpperCase(); // Uppercase for better matching
+        .toUpperCase();
   }
 
-  void _evaluateStabilizedText() {
-    if (_textCandidates.isEmpty) return;
+  void _evaluateAdaptiveDetection() {
+    if (_stats.occurrenceCount.isEmpty) return;
 
-    // Find the best candidate
     String? bestCandidate;
     double bestScore = 0.0;
 
-    for (final entry in _textCandidates.entries) {
+    for (final entry in _stats.occurrenceCount.entries) {
       final String text = entry.key;
       final int occurrences = entry.value;
-      final double avgConfidence = _textConfidences[text]! / occurrences;
+      final double avgConfidence = _stats.getAverageConfidence(text);
 
-      // Score combines occurrences and confidence
-      double score = (occurrences * 0.6) + (avgConfidence * 0.4);
+      // Adaptive scoring based on current thresholds
+      double score = (occurrences / _currentOccurrenceThreshold) * 0.6 +
+          (avgConfidence / _currentConfidenceThreshold) * 0.4;
 
-      if (occurrences >= _minimumOccurrences && score > bestScore) {
+      // Bonus for longer text (more meaningful)
+      if (text.length > 5) score *= 1.2;
+
+      // Time pressure bonus (after 2 seconds, be more lenient)
+      int elapsedMs = _stats.getElapsedMs();
+      if (elapsedMs > 2000) score *= 1.3;
+      if (elapsedMs > 3000) score *= 1.5;
+
+      if (occurrences >= _currentOccurrenceThreshold &&
+          avgConfidence >= _currentConfidenceThreshold &&
+          score > bestScore) {
         bestScore = score;
         bestCandidate = text;
       }
     }
 
-    // If we found a stable candidate, finalize it
+    // Check for quick wins (very high confidence single detection)
+    if (bestCandidate == null) {
+      for (final entry in _stats.occurrenceCount.entries) {
+        final String text = entry.key;
+        final double avgConfidence = _stats.getAverageConfidence(text);
+
+        // Quick win: very high confidence, even with single occurrence
+        if (avgConfidence > 0.9 && text.length >= 3) {
+          bestCandidate = text;
+          bestScore = 1.0;
+          break;
+        }
+      }
+    }
+
     if (bestCandidate != null && bestCandidate != _finalDetectedText) {
       setState(() {
         _finalDetectedText = bestCandidate;
         _debugInfo =
-            "✅ FINAL TEXT DETECTED: '$bestCandidate' (Score: ${bestScore.toStringAsFixed(2)})";
+            "✅ FINAL TEXT: '$bestCandidate' (Score: ${bestScore.toStringAsFixed(2)}, Time: ${_stats.getElapsedMs()}ms)";
       });
 
-      // Vibrate to indicate successful detection
       HapticFeedback.heavyImpact();
 
-      // Auto-stop detection after successful recognition
-      Future.delayed(const Duration(milliseconds: 500), () {
+      // Auto-stop after successful detection
+      Timer(const Duration(milliseconds: 300), () {
         if (mounted) stopDetection();
       });
     }
@@ -401,6 +480,17 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   void stopDetection() {
     _isDetecting = false;
     _detectionTimer?.cancel();
+    _emergencyTimer?.cancel();
+
+    // Turn off flash if enabled
+    if (_autoFlashEnabled) {
+      try {
+        _controller.setFlashMode(FlashMode.off);
+        _autoFlashEnabled = false;
+      } catch (e) {
+        print('Error turning off flash: $e');
+      }
+    }
 
     if (_controller.value.isInitialized &&
         _controller.value.isStreamingImages) {
@@ -415,64 +505,77 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   void clearDetectedText() {
     setState(() {
       _finalDetectedText = null;
-      _textCandidates.clear();
-      _textConfidences.clear();
-      _debugInfo = "Results cleared";
+      _debugInfo = "Ready for next detection 🎩";
     });
   }
 
-  // Enhanced single capture with multiple processing attempts
-  void captureAndProcessSingle() async {
+  // Enhanced single capture with burst mode
+  void enhancedCapture() async {
     try {
       await _initializeControllerFuture;
 
       setState(() {
-        _debugInfo = "Capturing optimized image...";
+        _debugInfo = "📸 Enhanced capture in progress...";
       });
 
-      // Ensure good focus before capture
-      await _controller.setFocusPoint(const Offset(0.5, 0.5));
-      await _controller.setFocusMode(FocusMode.auto);
-      await Future.delayed(const Duration(milliseconds: 300));
+      // Multiple rapid captures for best result
+      List<String> capturedTexts = [];
 
-      final XFile image = await _controller.takePicture();
+      for (int i = 0; i < 3; i++) {
+        // Auto-focus before each capture
+        await _controller.setFocusPoint(const Offset(0.5, 0.5));
+        await Future.delayed(const Duration(milliseconds: 100));
 
-      setState(() {
-        _debugInfo = "Processing captured image with enhanced settings...";
-      });
+        final XFile image = await _controller.takePicture();
+        final InputImage inputImage = InputImage.fromFilePath(image.path);
+        final RecognizedText recognizedText =
+            await _textRecognizer.processImage(inputImage);
 
-      final InputImage inputImage = InputImage.fromFilePath(image.path);
-      final RecognizedText recognizedText =
-          await _textRecognizer.processImage(inputImage);
+        for (final block in recognizedText.blocks) {
+          double blockConfidence = _calculateEnhancedConfidence(block);
+          if (blockConfidence >= 0.6) {
+            String cleanText = _cleanText(block.text);
+            if (cleanText.isNotEmpty && cleanText.length >= 2) {
+              capturedTexts.add(cleanText);
+            }
+          }
+        }
 
-      // Process with same confidence filtering
+        // Small delay between captures
+        if (i < 2) await Future.delayed(const Duration(milliseconds: 100));
+      }
+
+      // Find most common text from captures
       String? bestText;
-      double bestConfidence = 0.0;
+      if (capturedTexts.isNotEmpty) {
+        Map<String, int> textCounts = {};
+        for (String text in capturedTexts) {
+          textCounts[text] = (textCounts[text] ?? 0) + 1;
+        }
 
-      for (final block in recognizedText.blocks) {
-        double blockConfidence = _calculateBlockConfidence(block);
-        if (blockConfidence > bestConfidence &&
-            blockConfidence >= _minimumConfidence) {
-          bestConfidence = blockConfidence;
-          bestText = _cleanText(block.text);
+        int maxCount = 0;
+        for (final entry in textCounts.entries) {
+          if (entry.value > maxCount) {
+            maxCount = entry.value;
+            bestText = entry.key;
+          }
         }
       }
 
       setState(() {
-        if (bestText != null && bestText.isNotEmpty) {
+        if (bestText != null) {
           _finalDetectedText = bestText;
-          _debugInfo =
-              "✅ CAPTURED TEXT: '$bestText' (Confidence: ${bestConfidence.toStringAsFixed(2)})";
+          _debugInfo = "✅ ENHANCED CAPTURE: '$bestText'";
           HapticFeedback.heavyImpact();
         } else {
-          _debugInfo = "No reliable text detected in captured image";
+          _debugInfo =
+              "No reliable text detected. Try different lighting/angle.";
         }
       });
     } catch (e) {
       setState(() {
-        _debugInfo = "Error capturing/processing image: $e";
+        _debugInfo = "Error in enhanced capture: $e";
       });
-      print('Error capturing/processing image: $e');
     }
   }
 
@@ -481,7 +584,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text('Magic Text Detection'),
+        title: const Text('Magic Text Scanner'),
         backgroundColor: Colors.black87,
         elevation: 4,
         actions: [
@@ -501,86 +604,94 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
                 // Control buttons
                 Container(
                   padding: const EdgeInsets.all(16),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  child: Column(
                     children: [
-                      ElevatedButton.icon(
-                        onPressed: _isDetecting ? null : startDetection,
-                        icon: Icon(_isDetecting
-                            ? Icons.hourglass_empty
-                            : Icons.play_arrow),
-                        label: const Text('Start Detection'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green[700],
-                          foregroundColor: Colors.white,
-                        ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          ElevatedButton.icon(
+                            onPressed: _isDetecting ? null : startDetection,
+                            icon: Icon(_isDetecting
+                                ? Icons.hourglass_empty
+                                : Icons.play_arrow),
+                            label: const Text('Start'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.green[700],
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 20, vertical: 12),
+                            ),
+                          ),
+                          ElevatedButton.icon(
+                            onPressed: _isDetecting ? stopDetection : null,
+                            icon: const Icon(Icons.stop),
+                            label: const Text('Stop'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.red[700],
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 20, vertical: 12),
+                            ),
+                          ),
+                          ElevatedButton.icon(
+                            onPressed: enhancedCapture,
+                            icon: const Icon(Icons.burst_mode),
+                            label: const Text('Burst'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.purple[700],
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 20, vertical: 12),
+                            ),
+                          ),
+                        ],
                       ),
-                      ElevatedButton.icon(
-                        onPressed: _isDetecting ? stopDetection : null,
-                        icon: const Icon(Icons.stop),
-                        label: const Text('Stop'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red[700],
-                          foregroundColor: Colors.white,
+                      const SizedBox(height: 12),
+                      Text(
+                        '💡 Tip: Hold paper steady for 2-3 seconds. App adapts automatically!',
+                        style: TextStyle(
+                          color: Colors.blue[300],
+                          fontSize: 13,
+                          fontStyle: FontStyle.italic,
                         ),
-                      ),
-                      ElevatedButton.icon(
-                        onPressed: captureAndProcessSingle,
-                        icon: const Icon(Icons.camera_alt),
-                        label: const Text('Capture'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue[700],
-                          foregroundColor: Colors.white,
-                        ),
+                        textAlign: TextAlign.center,
                       ),
                     ],
                   ),
                 ),
 
-                // Status indicator
+                // Enhanced status indicator
                 Container(
                   margin: const EdgeInsets.symmetric(horizontal: 16),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: _isDetecting
-                        ? Colors.green[900]?.withOpacity(0.3)
-                        : Colors.grey[900]?.withOpacity(0.3),
+                    color: _getStatusColor().withOpacity(0.2),
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: _isDetecting ? Colors.green : Colors.grey,
-                      width: 1,
-                    ),
+                    border: Border.all(color: _getStatusColor(), width: 1),
                   ),
                   child: Row(
                     children: [
-                      Icon(
-                        _isDetecting ? Icons.visibility : Icons.visibility_off,
-                        color: _isDetecting ? Colors.green : Colors.grey,
-                        size: 20,
-                      ),
+                      Icon(_getStatusIcon(),
+                          color: _getStatusColor(), size: 20),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           _debugInfo,
-                          style: TextStyle(
-                            color: _isDetecting
-                                ? Colors.green[300]
-                                : Colors.grey[300],
-                            fontSize: 13,
-                          ),
+                          style:
+                              TextStyle(color: _getStatusColor(), fontSize: 13),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      if (_isFocusing)
+                      if (_isDetecting)
                         Container(
                           margin: const EdgeInsets.only(left: 8),
                           width: 16,
                           height: 16,
-                          child: const CircularProgressIndicator(
+                          child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            valueColor:
-                                AlwaysStoppedAnimation<Color>(Colors.blue),
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                                _getStatusColor()),
                           ),
                         ),
                     ],
@@ -589,48 +700,72 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
                 const SizedBox(height: 16),
 
-                // Camera preview
+                // Camera preview with enhanced indicators
                 Expanded(
                   flex: 3,
                   child: Container(
                     margin: const EdgeInsets.symmetric(horizontal: 16),
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: Colors.white24, width: 2),
+                      border: Border.all(
+                          color: _isDetecting ? Colors.green : Colors.white24,
+                          width: _isDetecting ? 3 : 2),
                     ),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(10),
                       child: Stack(
                         children: [
                           CameraPreview(_controller),
+
+                          // Scanning overlay
                           if (_isDetecting)
-                            Positioned(
-                              top: 16,
-                              right: 16,
+                            Positioned.fill(
                               child: Container(
-                                padding: const EdgeInsets.all(8),
                                 decoration: BoxDecoration(
-                                  color: Colors.green.withOpacity(0.8),
-                                  borderRadius: BorderRadius.circular(20),
+                                  border:
+                                      Border.all(color: Colors.green, width: 2),
+                                  color: Colors.green.withOpacity(0.1),
                                 ),
-                                child: const Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(Icons.search,
-                                        color: Colors.white, size: 16),
-                                    SizedBox(width: 4),
-                                    Text(
-                                      'SCANNING',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ],
+                                child: const Center(
+                                  child: Icon(
+                                    Icons.center_focus_strong,
+                                    color: Colors.green,
+                                    size: 100,
+                                  ),
                                 ),
                               ),
                             ),
+
+                          // Status badges
+                          Positioned(
+                            top: 16,
+                            right: 16,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                if (_isDetecting)
+                                  _buildStatusBadge(
+                                      'SCANNING', Colors.green, Icons.search),
+                                if (_hasIncreasedSensitivity)
+                                  _buildStatusBadge(
+                                      'ENHANCED', Colors.orange, Icons.tune),
+                                if (_autoFlashEnabled)
+                                  _buildStatusBadge('FLASH ON', Colors.yellow,
+                                      Icons.flash_on),
+                              ],
+                            ),
+                          ),
+
+                          // Center focus indicator
+                          const Positioned.fill(
+                            child: Center(
+                              child: Icon(
+                                Icons.center_focus_weak,
+                                color: Colors.white54,
+                                size: 60,
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -639,7 +774,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
                 const SizedBox(height: 16),
 
-                // Results section
+                // Enhanced results section
                 Expanded(
                   flex: 1,
                   child: Container(
@@ -655,76 +790,8 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
                       border: Border.all(color: Colors.white12, width: 1),
                     ),
                     child: _finalDetectedText == null
-                        ? const Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(
-                                  Icons.text_fields,
-                                  color: Colors.white38,
-                                  size: 48,
-                                ),
-                                SizedBox(height: 12),
-                                Text(
-                                  'No text detected yet',
-                                  style: TextStyle(
-                                    color: Colors.white54,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                                SizedBox(height: 4),
-                                Text(
-                                  'Place paper with text in front of camera',
-                                  style: TextStyle(
-                                    color: Colors.white38,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          )
-                        : Center(
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                const Icon(
-                                  Icons.check_circle,
-                                  color: Colors.green,
-                                  size: 48,
-                                ),
-                                const SizedBox(height: 16),
-                                const Text(
-                                  'DETECTED TEXT:',
-                                  style: TextStyle(
-                                    color: Colors.green,
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 1.2,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Container(
-                                  padding: const EdgeInsets.all(16),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white10,
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(
-                                        color: Colors.green, width: 1),
-                                  ),
-                                  child: Text(
-                                    _finalDetectedText!,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 24,
-                                      fontWeight: FontWeight.bold,
-                                      letterSpacing: 1.1,
-                                    ),
-                                    textAlign: TextAlign.center,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+                        ? _buildEmptyState()
+                        : _buildResultState(),
                   ),
                 ),
               ],
@@ -752,6 +819,108 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
             );
           }
         },
+      ),
+    );
+  }
+
+  Widget _buildStatusBadge(String text, Color color, IconData icon) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white, size: 14),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Color _getStatusColor() {
+    if (_finalDetectedText != null) return Colors.green;
+    if (_isDetecting) return Colors.blue;
+    return Colors.grey;
+  }
+
+  IconData _getStatusIcon() {
+    if (_finalDetectedText != null) return Icons.check_circle;
+    if (_isDetecting) return Icons.search;
+    return Icons.info_outline;
+  }
+
+  Widget _buildEmptyState() {
+    return const Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.text_fields, color: Colors.white38, size: 48),
+          SizedBox(height: 12),
+          Text(
+            'Ready for Magic! 🎩',
+            style: TextStyle(
+                color: Colors.white54,
+                fontSize: 16,
+                fontWeight: FontWeight.bold),
+          ),
+          SizedBox(height: 4),
+          Text(
+            'Place paper with text over camera',
+            style: TextStyle(color: Colors.white38, fontSize: 14),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildResultState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.auto_awesome, color: Colors.yellow, size: 48),
+          const SizedBox(height: 16),
+          const Text(
+            'MAGIC REVEALED! ✨',
+            style: TextStyle(
+              color: Colors.yellow,
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 1.2,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white10,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.yellow, width: 1),
+            ),
+            child: Text(
+              _finalDetectedText!,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.1,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ],
       ),
     );
   }
