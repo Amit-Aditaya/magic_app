@@ -501,6 +501,10 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       }
     }
     setState(() {});
+
+    Future.delayed(Duration(seconds: 2), () {
+      startDetection();
+    });
   }
 
   void clearDetectedText() {
