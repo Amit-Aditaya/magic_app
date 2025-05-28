@@ -1,7 +1,7 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+
 import 'app/app.dart';
 
 void main() async {
@@ -13,6 +13,7 @@ void main() async {
     (camera) => camera.lensDirection == CameraLensDirection.back,
     orElse: () => cameras.first,
   );
+  WakelockPlus.enable();
 
   runApp(MyApp(camera: backCamera));
 }
