@@ -27,6 +27,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   String _debugInfo = "";
   Timer? _detectionTimer;
   Timer? _emergencyTimer;
+  Timer? _restartTimer;
 
   // Adaptive detection system
   DetectionStats _stats = DetectionStats();
@@ -34,8 +35,8 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   bool _hasIncreasedSensitivity = false;
 
   // Optimized thresholds
-  double _currentConfidenceThreshold = 0.65; // Lowered for better sensitivity
-  int _currentOccurrenceThreshold = 2; // Lowered for faster detection
+  double _currentConfidenceThreshold = 0.65;
+  int _currentOccurrenceThreshold = 2;
 
   // Emergency fallback
   String? _bestCandidateText;
@@ -99,6 +100,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     stopDetection();
     _detectionTimer?.cancel();
     _emergencyTimer?.cancel();
+    _restartTimer?.cancel();
     _controller.dispose();
     _textRecognizer.close();
     WidgetsBinding.instance.removeObserver(this);
@@ -132,13 +134,13 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
       setState(() {
         _debugInfo = "🔍 Scanning for text... (Hold steady for 1-2 seconds)";
+        _isDetecting = true;
       });
 
       await _controller.startImageStream((CameraImage image) async {
-        if (_isProcessing) return;
+        if (_isProcessing || !_isDetecting) return;
 
         _isProcessing = true;
-        _isDetecting = true;
 
         try {
           // Enhanced auto-focus for clarity
@@ -160,8 +162,8 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     } catch (e) {
       setState(() {
         _debugInfo = "Error starting detection: $e";
+        _isDetecting = false;
       });
-      _isDetecting = false;
     }
   }
 
@@ -169,23 +171,27 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     _stats = DetectionStats();
     _hasTriggeredFlash = false;
     _hasIncreasedSensitivity = false;
-    _currentConfidenceThreshold = 0.65; // Start with lower threshold
-    _currentOccurrenceThreshold = 2; // Start with lower occurrence
+    _currentConfidenceThreshold = 0.65;
+    _currentOccurrenceThreshold = 2;
     _bestCandidateText = null;
     _bestCandidateScore = 0.0;
     _finalDetectedText = null;
   }
 
   void _setupAdaptiveTimers() {
-    // Main evaluation timer (faster)
+    // Cancel any existing timers
     _detectionTimer?.cancel();
+    _emergencyTimer?.cancel();
+
+    // Main evaluation timer (faster)
     _detectionTimer = Timer.periodic(
       const Duration(milliseconds: 250),
       (timer) => _evaluateAdaptiveDetection(),
     );
 
     // Step 1: Increase sensitivity after 1 second
-    Timer(const Duration(milliseconds: 1000), () {
+    _emergencyTimer?.cancel();
+    _emergencyTimer = Timer(const Duration(milliseconds: 1000), () {
       if (_isDetecting && _finalDetectedText == null) {
         _currentConfidenceThreshold = 0.55;
         _currentOccurrenceThreshold = 1;
@@ -204,7 +210,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     });
 
     // Step 3: Emergency fallback after 3 seconds
-    _emergencyTimer = Timer(const Duration(milliseconds: 3000), () {
+    Timer(const Duration(milliseconds: 3000), () {
       if (_isDetecting && _finalDetectedText == null) {
         _triggerEmergencyFallback();
       }
@@ -256,7 +262,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       });
 
       HapticFeedback.heavyImpact();
-      stopDetection();
+      _scheduleAutoRestart();
     } else {
       setState(() {
         _debugInfo = "⚠️ Trying enhanced capture...";
@@ -339,7 +345,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   }
 
   void _evaluateAdaptiveDetection() {
-    if (_stats.occurrenceCount.isEmpty) return;
+    if (!_isDetecting || _stats.occurrenceCount.isEmpty) return;
 
     String? bestCandidate;
     double bestScore = 0.0;
@@ -393,11 +399,30 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
       HapticFeedback.heavyImpact();
 
-      // Auto-stop after successful detection
-      Timer(const Duration(milliseconds: 300), () {
-        if (mounted) stopDetection();
-      });
+      // Schedule auto-restart after 2 seconds
+      _scheduleAutoRestart();
     }
+  }
+
+  // Schedule auto-restart after successful detection
+  void _scheduleAutoRestart() {
+    _restartTimer?.cancel();
+    _restartTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted && _isDetecting) {
+        // Cancel existing timers
+        _detectionTimer?.cancel();
+        _emergencyTimer?.cancel();
+
+        // Reset state for new detection
+        _resetDetectionState();
+        _setupAdaptiveTimers();
+
+        setState(() {
+          _finalDetectedText = null;
+          _debugInfo = "🔄 Restarted detection - ready for next text!";
+        });
+      }
+    });
   }
 
   InputImageRotation _getRotationValue(int sensorOrientation) {
@@ -432,6 +457,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     _isDetecting = false;
     _detectionTimer?.cancel();
     _emergencyTimer?.cancel();
+    _restartTimer?.cancel();
 
     // Turn off flash if enabled
     if (_autoFlashEnabled) {
@@ -524,6 +550,9 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
               "No reliable text detected. Try different lighting/angle.";
         }
       });
+
+      // Schedule auto-restart after enhanced capture
+      _scheduleAutoRestart();
     } catch (e) {
       setState(() {
         _debugInfo = "Error in enhanced capture: $e";
@@ -731,7 +760,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
                   flex: 1,
                   child: Container(
                     margin: const EdgeInsets.all(16),
-                    padding: const EdgeInsets.all(10),
+                    padding: const EdgeInsets.all(20),
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
                         colors: [Colors.grey[900]!, Colors.grey[800]!],
@@ -841,7 +870,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const SizedBox(height: 4),
+          const SizedBox(height: 16),
           const Text(
             'MAGIC REVEALED! ✨',
             style: TextStyle(
@@ -863,7 +892,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
               _finalDetectedText!,
               style: const TextStyle(
                 color: Colors.white,
-                fontSize: 16,
+                fontSize: 24,
                 fontWeight: FontWeight.bold,
                 letterSpacing: 1.1,
               ),
