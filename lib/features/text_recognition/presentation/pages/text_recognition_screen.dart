@@ -33,9 +33,9 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   bool _hasTriggeredFlash = false;
   bool _hasIncreasedSensitivity = false;
 
-  // Adaptive thresholds
-  double _currentConfidenceThreshold = 0.75; // Start high
-  int _currentOccurrenceThreshold = 3; // Start high
+  // Optimized thresholds
+  double _currentConfidenceThreshold = 0.65; // Lowered for better sensitivity
+  int _currentOccurrenceThreshold = 2; // Lowered for faster detection
 
   // Emergency fallback
   String? _bestCandidateText;
@@ -131,7 +131,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       _setupAdaptiveTimers();
 
       setState(() {
-        _debugInfo = "🔍 Scanning for text... (Hold steady for 2-3 seconds)";
+        _debugInfo = "🔍 Scanning for text... (Hold steady for 1-2 seconds)";
       });
 
       await _controller.startImageStream((CameraImage image) async {
@@ -153,7 +153,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
           print('Detection error: $e');
         } finally {
           // Faster processing for quicker detection
-          await Future.delayed(const Duration(milliseconds: 150));
+          await Future.delayed(const Duration(milliseconds: 100));
           _isProcessing = false;
         }
       });
@@ -169,8 +169,8 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     _stats = DetectionStats();
     _hasTriggeredFlash = false;
     _hasIncreasedSensitivity = false;
-    _currentConfidenceThreshold = 0.75;
-    _currentOccurrenceThreshold = 3;
+    _currentConfidenceThreshold = 0.65; // Start with lower threshold
+    _currentOccurrenceThreshold = 2; // Start with lower occurrence
     _bestCandidateText = null;
     _bestCandidateScore = 0.0;
     _finalDetectedText = null;
@@ -180,15 +180,15 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     // Main evaluation timer (faster)
     _detectionTimer?.cancel();
     _detectionTimer = Timer.periodic(
-      const Duration(milliseconds: 300),
+      const Duration(milliseconds: 250),
       (timer) => _evaluateAdaptiveDetection(),
     );
 
-    // Step 1: Lower thresholds after 1.5 seconds
-    Timer(const Duration(milliseconds: 1500), () {
+    // Step 1: Increase sensitivity after 1 second
+    Timer(const Duration(milliseconds: 1000), () {
       if (_isDetecting && _finalDetectedText == null) {
-        _currentConfidenceThreshold = 0.65;
-        _currentOccurrenceThreshold = 2;
+        _currentConfidenceThreshold = 0.55;
+        _currentOccurrenceThreshold = 1;
         setState(() {
           _debugInfo = "📸 Enhancing sensitivity...";
         });
@@ -196,15 +196,15 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       }
     });
 
-    // Step 2: Enable auto-flash after 2.5 seconds
-    Timer(const Duration(milliseconds: 2500), () {
+    // Step 2: Enable auto-flash after 1.5 seconds
+    Timer(const Duration(milliseconds: 1500), () {
       if (_isDetecting && _finalDetectedText == null) {
-        // _enableAutoFlash();
+        _enableAutoFlash();
       }
     });
 
-    // Step 3: Emergency fallback after 4 seconds
-    _emergencyTimer = Timer(const Duration(milliseconds: 4000), () {
+    // Step 3: Emergency fallback after 3 seconds
+    _emergencyTimer = Timer(const Duration(milliseconds: 3000), () {
       if (_isDetecting && _finalDetectedText == null) {
         _triggerEmergencyFallback();
       }
@@ -214,6 +214,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   Future<void> _smartAutoFocus() async {
     // More aggressive focus for text
     try {
+      await _controller.setFocusMode(FocusMode.auto);
       await _controller.setFocusPoint(const Offset(0.5, 0.5));
       await _controller.setExposurePoint(const Offset(0.5, 0.5));
     } catch (e) {
@@ -248,7 +249,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
   }
 
   void _triggerEmergencyFallback() {
-    if (_bestCandidateText != null && _bestCandidateScore > 0.3) {
+    if (_bestCandidateText != null && _bestCandidateScore > 0.2) {
       setState(() {
         _finalDetectedText = _bestCandidateText;
         _debugInfo = "✅ DETECTED (Emergency): '$_bestCandidateText'";
@@ -258,8 +259,9 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       stopDetection();
     } else {
       setState(() {
-        _debugInfo = "⚠️ Move paper closer or improve lighting";
+        _debugInfo = "⚠️ Trying enhanced capture...";
       });
+      enhancedCapture();
     }
   }
 
@@ -325,10 +327,6 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     if (block.text.length > 3) avgConfidence *= 1.15;
     if (block.text.length > 6) avgConfidence *= 1.1;
 
-    // Boost confidence if we've lowered thresholds (harder conditions)
-    if (_hasIncreasedSensitivity) avgConfidence *= 1.1;
-    if (_hasTriggeredFlash) avgConfidence *= 1.05;
-
     return avgConfidence.clamp(0.0, 1.0);
   }
 
@@ -358,10 +356,10 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       // Bonus for longer text (more meaningful)
       if (text.length > 5) score *= 1.2;
 
-      // Time pressure bonus (after 2 seconds, be more lenient)
+      // Time pressure bonus (after 1 second, be more lenient)
       int elapsedMs = _stats.getElapsedMs();
-      if (elapsedMs > 2000) score *= 1.3;
-      if (elapsedMs > 3000) score *= 1.5;
+      if (elapsedMs > 1000) score *= 1.3;
+      if (elapsedMs > 2000) score *= 1.5;
 
       if (occurrences >= _currentOccurrenceThreshold &&
           avgConfidence >= _currentConfidenceThreshold &&
@@ -378,7 +376,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
         final double avgConfidence = _stats.getAverageConfidence(text);
 
         // Quick win: very high confidence, even with single occurrence
-        if (avgConfidence > 0.9 && text.length >= 3) {
+        if (avgConfidence > 0.85 && text.length >= 3) {
           bestCandidate = text;
           bestScore = 1.0;
           break;
@@ -454,10 +452,6 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       }
     }
     setState(() {});
-
-    Future.delayed(const Duration(seconds: 2), () {
-      startDetection();
-    });
   }
 
   void clearDetectedText() {
@@ -491,7 +485,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
         for (final block in recognizedText.blocks) {
           double blockConfidence = _calculateEnhancedConfidence(block);
-          if (blockConfidence >= 0.6) {
+          if (blockConfidence >= 0.5) {
             String cleanText = _cleanText(block.text);
             if (cleanText.isNotEmpty && cleanText.length >= 2) {
               capturedTexts.add(cleanText);
@@ -737,7 +731,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
                   flex: 1,
                   child: Container(
                     margin: const EdgeInsets.all(16),
-                    padding: const EdgeInsets.all(20),
+                    padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
                         colors: [Colors.grey[900]!, Colors.grey[800]!],
@@ -824,7 +818,6 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-//Icon(Icons.text_fields, color: Colors.white38, size: 48),
           SizedBox(height: 12),
           Text(
             'Ready for Magic! 🎩',
@@ -848,8 +841,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          //const Icon(Icons.auto_awesome, color: Colors.yellow, size: 48),
-          const SizedBox(height: 16),
+          const SizedBox(height: 4),
           const Text(
             'MAGIC REVEALED! ✨',
             style: TextStyle(
@@ -871,7 +863,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
               _finalDetectedText!,
               style: const TextStyle(
                 color: Colors.white,
-                fontSize: 24,
+                fontSize: 16,
                 fontWeight: FontWeight.bold,
                 letterSpacing: 1.1,
               ),
