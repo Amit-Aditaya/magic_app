@@ -205,7 +205,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     // Step 2: Enable auto-flash after 1.5 seconds
     Timer(const Duration(milliseconds: 1500), () {
       if (_isDetecting && _finalDetectedText == null) {
-        _enableAutoFlash();
+        //  _enableAutoFlash();
       }
     });
 
