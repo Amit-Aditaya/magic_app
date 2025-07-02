@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -58,7 +59,9 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
       widget.camera,
       ResolutionPreset.veryHigh,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.yuv420,
+      imageFormatGroup: Platform.isIOS
+          ? ImageFormatGroup.bgra8888 // 🟢 Required for iOS
+          : ImageFormatGroup.nv21,
     );
 
     _initializeControllerFuture = _controller.initialize().then((_) {
@@ -148,7 +151,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
           final inputImage = await _convertCameraImage(image);
           final RecognizedText recognizedText =
-              await _textRecognizer.processImage(inputImage);
+              await _textRecognizer.processImage(inputImage!);
 
           _processRecognitionResults(recognizedText);
         } catch (e) {
@@ -171,8 +174,16 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     _stats = DetectionStats();
     _hasTriggeredFlash = false;
     _hasIncreasedSensitivity = false;
+
+    // ✅ Set base thresholds
     _currentConfidenceThreshold = 0.65;
     _currentOccurrenceThreshold = 2;
+
+    // ✅ Lower threshold for iOS (confidence is always null there)
+    if (Platform.isIOS) {
+      _currentConfidenceThreshold = 0.0; // or 0.15 if you want some margin
+    }
+
     _bestCandidateText = null;
     _bestCandidateScore = 0.0;
     _finalDetectedText = null;
@@ -271,19 +282,28 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
     }
   }
 
-  Future<InputImage> _convertCameraImage(CameraImage image) async {
+  Future<InputImage?> _convertCameraImage(CameraImage image) async {
+    if (Platform.isIOS && image.planes.length != 1) {
+      // iOS requires single-plane BGRA8888
+      debugPrint("Invalid image format for iOS");
+      return null;
+    }
+
     final WriteBuffer allBytes = WriteBuffer();
     for (final Plane plane in image.planes) {
       allBytes.putUint8List(plane.bytes);
     }
     final bytes = allBytes.done().buffer.asUint8List();
 
-    final Size imageSize =
-        Size(image.width.toDouble(), image.height.toDouble());
+    final Size imageSize = Size(
+      image.width.toDouble(),
+      image.height.toDouble(),
+    );
+
     final imageRotation = _getRotationValue(widget.camera.sensorOrientation);
-    final inputImageFormat =
-        InputImageFormatValue.fromRawValue(image.format.raw) ??
-            InputImageFormat.yuv420;
+
+    final InputImageFormat inputImageFormat =
+        Platform.isIOS ? InputImageFormat.bgra8888 : InputImageFormat.nv21;
 
     return InputImage.fromBytes(
       bytes: bytes,
@@ -320,7 +340,8 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
     for (final line in block.lines) {
       for (final element in line.elements) {
-        confidence += element.confidence ?? 0.0;
+        // 👇 treat null as 1.0 (or 0.9 if you prefer)
+        confidence += (element.confidence ?? 1.0);
         elementCount++;
       }
     }
@@ -329,7 +350,7 @@ class _TextRecognitionScreenState extends State<TextRecognitionScreen>
 
     double avgConfidence = confidence / elementCount;
 
-    // Enhanced scoring with adaptive boosts
+    // keep your extra boosts
     if (block.text.length > 3) avgConfidence *= 1.15;
     if (block.text.length > 6) avgConfidence *= 1.1;
 
